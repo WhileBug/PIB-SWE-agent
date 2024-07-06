@@ -860,3 +860,124 @@ class Agent:
         if return_type == "info_trajectory":
             return info, trajectory
         return trajectory[-1][return_type]
+
+    def run_screenshot(
+        self,
+        setup_args: dict[str, Any],
+        env: SWEEnv,
+        observation: str | None = None,
+        traj_dir: Path | None = None,
+        return_type: str | None = "info_trajectory",
+        init_model_stats: APIStats | None = None,
+        screenshot_trajectory:list = [],
+        screenshot_check_index:int = None
+    ):
+        def query_screenshot_traj(
+                traj_index
+        ):
+            return screenshot_trajectory[traj_index]["thought"], screenshot_trajectory[traj_index]["action"], screenshot_trajectory[traj_index]["output"]
+
+        """
+        Run the agent on an environment.
+        Return the final value of the specified return type.
+
+        Args:
+            setup_args: Arguments to pass to the agent's setup method.
+            env: The environment to run the agent on.
+            observation: Output from environment setup
+            traj_dir: Directory to save the trajectory to
+            return_type: Controls what to return.
+                This should be left at `info_trajectory`, the
+                other values are for internal usage with subroutines.
+            init_model_stats: Initial model stats to use for the run.
+
+        Returns:
+            If return_type is "info_trajectory", returns a tuple of
+            the info dictionary and the trajectory (list of dictionaries).
+        """
+        done = False
+        # mypy checks
+        assert env.container_obj is not None
+        assert env.record is not None
+        assert self.config is not None
+
+        if env.container_obj.id != self.last_container_id:
+            self.logger.info(f"Initializing agent settings for container {env.container_obj.id}")
+            self.init_environment_vars(env)
+            self.last_container_id = env.container_obj.id
+        # Re-initialize primary
+        self.setup(setup_args, init_model_stats)
+
+        for hook in self.hooks:
+            hook.on_run_start()
+
+        screenshot_index = 0
+        # Run action/observation loop
+        trajectory = []
+        info = {}
+        traj_log_path = traj_dir / (env.record["instance_id"] + ".traj")
+        self.logger.info("Trajectory will be saved to %s", traj_log_path)
+        while not done:
+            for hook in self.hooks:
+                hook.on_step_start()
+            state = env.communicate(self.state_command) if self.state_command else None
+
+            # Added screenshot
+            if screenshot_index>=screenshot_check_index:
+                thought, action, output = self.forward(observation, env.get_available_actions(), state)
+            else:
+                thought, action, output = query_screenshot_traj(
+                    traj_index=screenshot_index
+                )
+            screenshot_index+=1
+
+            for hook in self.hooks:
+                hook.on_actions_generated(thought=thought, action=action, output=output)
+            observations = list()
+            run_action = self._guard_multiline_input(action)
+            for sub_action in self.split_actions(run_action):
+                if sub_action["agent"] == self.name or sub_action["cmd_name"] == self.config.submit_command:
+                    for hook in self.hooks:
+                        hook.on_sub_action_started(sub_action=sub_action)
+                    obs, _, done, info = env.step(sub_action["action"])
+                    for hook in self.hooks:
+                        hook.on_sub_action_executed(obs=obs, done=done)
+                    observations.append(obs)
+                    if sub_action["cmd_name"] == self.config.submit_command:
+                        done = True
+                    if done:
+                        break
+                else:
+                    agent_name = sub_action["agent"]
+                    sub_agent_output = self.call_subroutine(agent_name, sub_action, env)
+                    observations.append(sub_agent_output)
+
+            observation = "\n".join([obs for obs in observations if obs is not None])
+
+            trajectory_step = TrajectoryStep(
+                {
+                    "action": action,
+                    "observation": observation,
+                    "response": output,
+                    "state": state,
+                    "thought": thought,
+                },
+            )
+            trajectory.append(trajectory_step)
+            model_stats: APIStats = self.model.stats
+            info["model_stats"] = model_stats.to_dict()
+            if traj_dir:
+                self.save_trajectory(trajectory, traj_log_path, env_name=env.name, info=info)
+            for hook in self.hooks:
+                hook.on_step_done(trajectory_step=trajectory_step, model_stats=model_stats)
+
+        for hook in self.hooks:
+            hook.on_run_done()
+
+        self.logger.info("Trajectory saved to %s", traj_log_path)
+
+        if return_type == "info":
+            return info
+        if return_type == "info_trajectory":
+            return info, trajectory
+        return trajectory[-1][return_type]

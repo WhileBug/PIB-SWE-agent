@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os.path
 
 from sweagent import CONFIG_DIR
 from sweagent.utils.log import add_file_handler, get_logger
@@ -68,6 +69,16 @@ python run.py --model_name "gpt4" --data_path "/path/to/my_issue.md" --repo_path
 logger = get_logger("swe-agent-run")
 logging.getLogger("simple_parsing").setLevel(logging.WARNING)
 
+
+def get_screenshot():
+    traj_filename = "screenshot.traj"
+    if not os.path.exists(traj_filename):
+        return None
+    else:
+        with open(traj_filename, "r")as f:
+            traj_dict = json.load(f)
+            #screenshot_trajectory = traj_dict["trajectory"]
+        return traj_dict
 
 @dataclass(frozen=True)
 class ActionsArguments(FlattenedAccess, FrozenSerializable):
@@ -362,13 +373,27 @@ class Main:
             tests = "\n".join([f"- {x}" for x in self.env.record["FAIL_TO_PASS"]])
 
         setup_args = {"issue": issue, "files": files, "test_files": test_files, "tests": tests}
-        info, trajectory = self.agent.run(
-            setup_args=setup_args,
-            env=self.env,
-            observation=observation,
-            traj_dir=self.traj_dir,
-            return_type="info_trajectory",
-        )
+
+        screenshot_trajectory = get_screenshot()
+        if screenshot_trajectory is None:
+            info, trajectory = self.agent.run(
+                setup_args=setup_args,
+                env=self.env,
+                observation=observation,
+                traj_dir=self.traj_dir,
+                return_type="info_trajectory",
+            )
+        else:
+            info, trajectory = self.agent.run_screenshot(
+                setup_args=setup_args,
+                env=self.env,
+                observation=observation,
+                traj_dir=self.traj_dir,
+                return_type="info_trajectory",
+                screenshot_trajectory=screenshot_trajectory["trajectory"],
+                screenshot_check_index=screenshot_trajectory["screenshot_index"]
+            )
+
         self._save_predictions(instance_id, info)
         for hook in self.hooks:
             hook.on_instance_completed(info=info, trajectory=trajectory)
